@@ -875,7 +875,10 @@ export default function App() {
         </div>
 
         {/* Hidden camera / file input */}
-        <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={onPickFile} style={{ display: "none" }} />
+        {/* No `capture` attribute — that forces some mobile browsers (esp. Android Chrome)
+            straight into the camera and hides the photo-library option. Leaving it off
+            lets the OS show its normal picker with both Camera and Library choices. */}
+        <input ref={fileRef} type="file" accept="image/*" onChange={onPickFile} style={{ display: "none" }} />
       </div>
     </>
   );
