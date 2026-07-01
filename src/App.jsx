@@ -246,6 +246,7 @@ export default function App() {
   const [showSearch, setShowSearch] = useState(false);
   const [search, setSearch] = useState("");
   const [toast, setToast] = useState(null);
+  const [analyzeError, setAnalyzeError] = useState(null);
 
   const fileRef = useRef(null);
   const timerRef = useRef(null);
@@ -287,9 +288,12 @@ export default function App() {
   const insights = buildInsights({ entries: todayEntries, kcal: todayKcal, macros, goal, streak, avg: avgLast7, loggedDays: logged7.length });
 
   // ── Snap handlers ──────────────────────────────────
-  const startAnalyze = useCallback((dataUrl) => {
-    setImage(dataUrl);
+  // Demo mode (no photo): fall back to the offline simulated guess so the
+  // flow is still explorable without a camera or API key.
+  const startDemoAnalyze = useCallback(() => {
+    setImage(null);
     setPhase("analyzing");
+    setAnalyzeError(null);
     setShowSearch(false);
     setSearch("");
     const meal = currentMeal();
@@ -301,16 +305,82 @@ export default function App() {
       setAlternates(r.alternates);
       setPortion("M");
       setPhase("result");
-    }, 2000);
+    }, 1600);
   }, []);
+
+  // Real photo: send to the /api/analyze serverless function, which calls
+  // Claude vision server-side (API key never touches the browser).
+  const analyzePhoto = useCallback(async (dataUrl, meal) => {
+    setPhase("analyzing");
+    setAnalyzeError(null);
+    try {
+      const res = await fetch("/api/analyze", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ image: dataUrl, mealType: meal }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+      if (!data.name) throw new Error("No result returned");
+
+      const id = data.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || "food";
+      setCandidate({
+        id, name: data.name, emoji: data.emoji || "🍽️",
+        kcal: Number(data.kcal) || 0, carbs: Number(data.carbs) || 0,
+        protein: Number(data.protein) || 0, fat: Number(data.fat) || 0,
+        confidence: data.confidence != null ? Math.round(data.confidence) : null,
+      });
+      setAlternates((data.alternates || []).slice(0, 3).map((a, i) => ({
+        id: `${id}-alt-${i}`, name: a.name, emoji: a.emoji || "🍽️",
+        kcal: Number(a.kcal) || 0, carbs: Number(a.carbs) || 0,
+        protein: Number(a.protein) || 0, fat: Number(a.fat) || 0,
+      })));
+      setPortion("M");
+      setPhase("result");
+    } catch (err) {
+      // Analysis failed (no API key configured, offline, model hiccup) —
+      // land on the result screen with search open instead of a dead end.
+      setCandidate(null);
+      setAlternates([]);
+      setAnalyzeError(err.message || "Couldn't analyze this photo.");
+      setShowSearch(true);
+      setPhase("result");
+    }
+  }, []);
+
+  // Downscale to keep uploads fast/cheap, then dispatch to analysis.
+  const startAnalyze = useCallback((file) => {
+    const meal = currentMeal();
+    setMealType(meal);
+    setShowSearch(false);
+    setSearch("");
+
+    const img = new Image();
+    const reader = new FileReader();
+    reader.onload = () => {
+      img.onload = () => {
+        const maxDim = 768;
+        const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+        const w = Math.round(img.width * scale);
+        const h = Math.round(img.height * scale);
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+        const resized = canvas.toDataURL("image/jpeg", 0.82);
+        setImage(resized);
+        analyzePhoto(resized, meal);
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  }, [analyzePhoto]);
 
   const onPickFile = (e) => {
     const file = e.target.files?.[0];
     e.target.value = ""; // allow re-picking the same file
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => startAnalyze(reader.result);
-    reader.readAsDataURL(file);
+    startAnalyze(file);
   };
 
   const chooseFood = (food) => {
@@ -327,6 +397,7 @@ export default function App() {
     setAlternates([]);
     setShowSearch(false);
     setSearch("");
+    setAnalyzeError(null);
   };
 
   const addEntry = () => {
@@ -453,7 +524,7 @@ export default function App() {
                       <span style={{ fontFamily: heading, fontSize: 20, fontWeight: 800 }}>Take / choose a photo</span>
                       <span style={{ fontSize: 12.5, opacity: 0.9, fontWeight: 500 }}>Opens your camera on a phone</span>
                     </button>
-                    <button className="press" onClick={() => startAnalyze(null)} style={{
+                    <button className="press" onClick={startDemoAnalyze} style={{
                       background: "#fff", border: `1.5px dashed ${C.line}`, borderRadius: 16, padding: "13px",
                       color: C.ink2, fontWeight: 700, fontSize: 14,
                     }}>✨ No photo handy? Try a demo plate</button>
@@ -502,9 +573,21 @@ export default function App() {
                       )}
                     </div>
 
-                    {phase === "result" && candidate && (
+                    {phase === "result" && (
                       <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                        {/* Analysis error banner — shown when the vision API couldn't return a guess */}
+                        {analyzeError && (
+                          <div style={{ display: "flex", gap: 10, alignItems: "flex-start", background: "rgba(246,104,155,0.1)", border: `1.5px solid rgba(246,104,155,0.28)`, borderRadius: 16, padding: "13px 15px" }}>
+                            <span style={{ fontSize: 20 }}>🙈</span>
+                            <div>
+                              <p style={{ fontWeight: 800, fontSize: 13.5, color: C.ink }}>Couldn't analyze this photo</p>
+                              <p style={{ fontSize: 12, color: C.ink2, marginTop: 2 }}>{analyzeError} — search for it below instead.</p>
+                            </div>
+                          </div>
+                        )}
+
                         {/* Guess card */}
+                        {candidate && (
                         <div style={{ background: "#fff", borderRadius: 22, padding: 18, boxShadow: "0 10px 26px rgba(244,81,44,0.10)", border: `1px solid ${C.line}` }}>
                           <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
                             <div style={{ fontSize: 46, width: 66, height: 66, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(255,159,69,0.14)", borderRadius: 18 }}>{candidate.emoji}</div>
@@ -532,6 +615,7 @@ export default function App() {
                             <MacroBar label="Fat" grams={scaled.fat} target={MACRO_TARGETS.fat} color={C.berry} />
                           </div>
                         </div>
+                        )}
 
                         {/* Portion */}
                         <div>
@@ -569,7 +653,7 @@ export default function App() {
 
                         {/* Alternates / search */}
                         <div>
-                          <Label>Not quite right?</Label>
+                          <Label>{candidate ? "Not quite right?" : "Find your food"}</Label>
                           {!showSearch ? (
                             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                               {alternates.map((f) => (
@@ -611,10 +695,11 @@ export default function App() {
                             flex: "0 0 auto", background: "#fff", border: `1.5px solid ${C.line}`, borderRadius: 16,
                             padding: "14px 18px", fontWeight: 700, fontSize: 14, color: C.ink2,
                           }}>↺ Retake</button>
-                          <button className="press" onClick={addEntry} style={{
+                          <button className="press" onClick={addEntry} disabled={!candidate} style={{
                             flex: 1, border: "none", borderRadius: 16, padding: "14px", color: "#fff", fontWeight: 800, fontSize: 15.5,
-                            fontFamily: heading, background: "linear-gradient(135deg,#ff8a63,#f4512c)", boxShadow: "0 10px 22px rgba(244,81,44,0.3)",
-                          }}>Add to Diary +{scaled.kcal}</button>
+                            fontFamily: heading, opacity: candidate ? 1 : 0.45,
+                            background: "linear-gradient(135deg,#ff8a63,#f4512c)", boxShadow: candidate ? "0 10px 22px rgba(244,81,44,0.3)" : "none",
+                          }}>{candidate ? `Add to Diary +${scaled.kcal}` : "Pick a food first"}</button>
                         </div>
                       </div>
                     )}
