@@ -81,6 +81,21 @@ another host that supports serverless/edge functions).
 
 ---
 
+## ⚠️ Shipping an update: bump the service worker cache version
+
+`public/sw.js` caches `index.html` offline-first. The browser only re-checks the service worker
+when the file's *bytes* change — so if you ship a code change without touching `sw.js`, browsers
+that already visited keep running the **old** service worker, which serves the **old** cached
+`index.html`. That old file points at JS bundle filenames the new build no longer has, so the
+page loads blank/broken until the cache is invalidated.
+
+**Every time you push a change to `src/` or `index.html`, bump the `CACHE` constant** in
+`public/sw.js` (e.g. `"calorie-snap-v2"` → `"calorie-snap-v3"`). That's what forces the browser
+to install the new service worker and clear the stale cache. Same pattern as `pomodoro-pwa` in
+this workstation.
+
+---
+
 ## Deploy to Vercel (free, ~3 minutes)
 
 ### Step 1 — Push to GitHub

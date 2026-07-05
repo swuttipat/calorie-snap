@@ -1,4 +1,4 @@
-const CACHE = "calorie-snap-v1";
+const CACHE = "calorie-snap-v2";
 const ASSETS = ["/", "/index.html"];
 
 self.addEventListener("install", (e) => {
