@@ -267,6 +267,11 @@ export default function App() {
       if (fb) setFeedback(JSON.parse(fb));
     } catch (_) {}
     setLoaded(true);
+    // Ask the browser to treat this app's storage as persistent rather than evictable.
+    // Installed/standalone PWAs (esp. on iOS) can otherwise have localStorage cleared under
+    // storage pressure or Safari's "unused site" cleanup — this doesn't force it, but it's
+    // the one signal that meaningfully lowers the odds. Safe no-op where unsupported.
+    try { navigator.storage?.persist?.(); } catch (_) {}
     return () => clearTimeout(timerRef.current);
   }, []);
 
