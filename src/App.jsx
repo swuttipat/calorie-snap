@@ -248,8 +248,13 @@ export default function App() {
   const [toast, setToast] = useState(null);
   const [analyzeError, setAnalyzeError] = useState(null);
 
+  // AI-accuracy feedback: was the current AI guess right? null = not yet answered.
+  const [aiFeedback, setAiFeedback] = useState(null); // null | "up" | "down"
+  const [feedback, setFeedback] = useState([]); // logged confirm/wrong events, for the Insights accuracy card + future prompts
+
   const fileRef = useRef(null);
   const timerRef = useRef(null);
+  const wrongLoggedRef = useRef(false); // guards against double-logging the same wrong guess
 
   // Load
   useEffect(() => {
@@ -258,6 +263,8 @@ export default function App() {
       if (d) setDiary(JSON.parse(d));
       const g = localStorage.getItem("calorie-snap-goal");
       if (g) setGoal(JSON.parse(g));
+      const fb = localStorage.getItem("calorie-snap-feedback");
+      if (fb) setFeedback(JSON.parse(fb));
     } catch (_) {}
     setLoaded(true);
     return () => clearTimeout(timerRef.current);
@@ -266,6 +273,12 @@ export default function App() {
   // Save
   useEffect(() => { if (loaded) try { localStorage.setItem("calorie-snap-diary", JSON.stringify(diary)); } catch (_) {} }, [diary, loaded]);
   useEffect(() => { if (loaded) try { localStorage.setItem("calorie-snap-goal", JSON.stringify(goal)); } catch (_) {} }, [goal, loaded]);
+  useEffect(() => { if (loaded) try { localStorage.setItem("calorie-snap-feedback", JSON.stringify(feedback)); } catch (_) {} }, [feedback, loaded]);
+
+  // Append one confirm/wrong event, capped so the log doesn't grow forever.
+  const logFeedback = useCallback((record) => {
+    setFeedback((prev) => [...prev, { ...record, ts: Date.now() }].slice(-60));
+  }, []);
 
   // Derived — today
   const todayKey = getTodayKey();
@@ -287,6 +300,22 @@ export default function App() {
 
   const insights = buildInsights({ entries: todayEntries, kcal: todayKcal, macros, goal, streak, avg: avgLast7, loggedDays: logged7.length });
 
+  // AI scan accuracy, from the user's own thumbs-up/down + implicit corrections —
+  // shown only once there's enough signal to mean something.
+  const recentFeedback = feedback.slice(-20);
+  const confirmCount = recentFeedback.filter((f) => f.type === "confirm").length;
+  const wrongCount = recentFeedback.filter((f) => f.type === "wrong").length;
+  const feedbackTotal = confirmCount + wrongCount;
+  const accuracyInsight = feedbackTotal >= 3
+    ? (() => {
+        const pct = Math.round((confirmCount / feedbackTotal) * 100);
+        return pct >= 80
+          ? { tone: "good", emoji: "🎯", title: `AI got it right ${pct}% of the time`, body: `Based on your last ${feedbackTotal} scans and corrections. Keep tapping 👍/👎 to help it stay sharp.` }
+          : { tone: "tip", emoji: "🔍", title: `AI accuracy: ${pct}% lately`, body: `Based on your last ${feedbackTotal} scans. Your corrections are remembered — future scans get a hint about foods it's mislabeled for you before.` };
+      })()
+    : null;
+  const allInsights = accuracyInsight ? [accuracyInsight, ...insights] : insights;
+
   // ── Snap handlers ──────────────────────────────────
   // Demo mode (no photo): fall back to the offline simulated guess so the
   // flow is still explorable without a camera or API key.
@@ -301,10 +330,12 @@ export default function App() {
     clearTimeout(timerRef.current);
     timerRef.current = setTimeout(() => {
       const r = recognize(meal);
-      setCandidate({ ...r.primary });
+      setCandidate({ ...r.primary, source: "demo" });
       setAlternates(r.alternates);
       setPortion("M");
       setPhase("result");
+      setAiFeedback(null);
+      wrongLoggedRef.current = false;
     }, 1600);
   }, []);
 
@@ -313,11 +344,20 @@ export default function App() {
   const analyzePhoto = useCallback(async (dataUrl, meal) => {
     setPhase("analyzing");
     setAnalyzeError(null);
+    setAiFeedback(null);
+    wrongLoggedRef.current = false;
     try {
+      // Recent mislabels this user corrected, so the model can weigh them for
+      // genuinely ambiguous photos instead of repeating the same mistake.
+      const pastCorrections = feedback
+        .filter((f) => f.type === "wrong" && f.correctedTo)
+        .slice(-5)
+        .map((f) => ({ guessed: f.guessed, correctedTo: f.correctedTo }));
+
       const res = await fetch("/api/analyze", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ image: dataUrl, mealType: meal }),
+        body: JSON.stringify({ image: dataUrl, mealType: meal, pastCorrections }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
@@ -329,6 +369,7 @@ export default function App() {
         kcal: Number(data.kcal) || 0, carbs: Number(data.carbs) || 0,
         protein: Number(data.protein) || 0, fat: Number(data.fat) || 0,
         confidence: data.confidence != null ? Math.round(data.confidence) : null,
+        source: "ai",
       });
       setAlternates((data.alternates || []).slice(0, 3).map((a, i) => ({
         id: `${id}-alt-${i}`, name: a.name, emoji: a.emoji || "🍽️",
@@ -346,7 +387,7 @@ export default function App() {
       setShowSearch(true);
       setPhase("result");
     }
-  }, []);
+  }, [feedback]);
 
   // Downscale to keep uploads fast/cheap, then dispatch to analysis.
   const startAnalyze = useCallback((file) => {
@@ -359,7 +400,9 @@ export default function App() {
     const reader = new FileReader();
     reader.onload = () => {
       img.onload = () => {
-        const maxDim = 768;
+        // Larger than the original 768px cap — more detail helps the model tell
+        // apart visually similar dishes (sauce color, garnish, texture).
+        const maxDim = 1024;
         const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
         const w = Math.round(img.width * scale);
         const h = Math.round(img.height * scale);
@@ -367,7 +410,7 @@ export default function App() {
         canvas.width = w;
         canvas.height = h;
         canvas.getContext("2d").drawImage(img, 0, 0, w, h);
-        const resized = canvas.toDataURL("image/jpeg", 0.82);
+        const resized = canvas.toDataURL("image/jpeg", 0.85);
         setImage(resized);
         analyzePhoto(resized, meal);
       };
@@ -383,13 +426,37 @@ export default function App() {
     startAnalyze(file);
   };
 
+  const markGuessCorrect = () => {
+    if (!candidate || candidate.source !== "ai" || aiFeedback !== null) return;
+    logFeedback({ type: "confirm", guessed: candidate.name });
+    setAiFeedback("up");
+  };
+
+  const markGuessWrong = () => {
+    if (!candidate || candidate.source !== "ai") return;
+    setAiFeedback("down");
+    setShowSearch(true); // jump straight to fixing it
+  };
+
   const chooseFood = (food) => {
-    setCandidate({ ...food, confidence: null }); // manual pick — no mock confidence
+    // Picking something different from an unconfirmed AI guess IS feedback that the
+    // guess was wrong, whether or not the user tapped 👎 first — log it either way,
+    // once, so the correction can inform future scans.
+    if (candidate?.source === "ai" && aiFeedback !== "up" && food.name !== candidate.name && !wrongLoggedRef.current) {
+      logFeedback({ type: "wrong", guessed: candidate.name, correctedTo: food.name });
+      wrongLoggedRef.current = true;
+    }
+    setCandidate({ ...food, confidence: null, source: "manual" }); // manual pick — no mock confidence
     setShowSearch(false);
     setSearch("");
   };
 
   const resetSnap = () => {
+    // Thumbs-down with no replacement picked (e.g. they just retake) still counts
+    // as a wrong guess for the accuracy stat — log it without a correction target.
+    if (candidate?.source === "ai" && aiFeedback === "down" && !wrongLoggedRef.current) {
+      logFeedback({ type: "wrong", guessed: candidate.name, correctedTo: null });
+    }
     clearTimeout(timerRef.current);
     setImage(null);
     setPhase("idle");
@@ -398,6 +465,8 @@ export default function App() {
     setShowSearch(false);
     setSearch("");
     setAnalyzeError(null);
+    setAiFeedback(null);
+    wrongLoggedRef.current = false;
   };
 
   const addEntry = () => {
@@ -418,6 +487,11 @@ export default function App() {
     };
     setDiary((prev) => ({ ...prev, [todayKey]: [...(prev[todayKey] || []), entry] }));
     setToast({ emoji: candidate.emoji, name: candidate.name });
+    // Logging the AI's guess as-is without ever flagging it wrong is itself a signal
+    // that it was right — count it for the accuracy stat if nothing was logged yet.
+    if (candidate.source === "ai" && aiFeedback === null) {
+      logFeedback({ type: "confirm", guessed: candidate.name });
+    }
     clearTimeout(timerRef.current);
     timerRef.current = setTimeout(() => setToast(null), 2200);
     resetSnap();
@@ -603,6 +677,21 @@ export default function App() {
                               <p style={{ fontSize: 12, color: C.muted, marginTop: 3 }}>Estimated — tap below to adjust</p>
                             </div>
                           </div>
+
+                          {/* AI accuracy feedback — only for real vision guesses, not manual picks/demo */}
+                          {candidate.source === "ai" && (
+                            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12 }}>
+                              <span style={{ fontSize: 11.5, color: C.muted, fontWeight: 600 }}>Did we get it right?</span>
+                              <button className="press" onClick={markGuessCorrect} disabled={aiFeedback !== null} style={{
+                                border: `1.5px solid ${aiFeedback === "up" ? C.green : C.line}`, background: aiFeedback === "up" ? "rgba(53,192,122,0.14)" : "#fff",
+                                borderRadius: 999, padding: "5px 12px", fontSize: 13, fontWeight: 700, color: aiFeedback === "up" ? C.green : C.ink2, opacity: aiFeedback === "down" ? 0.4 : 1,
+                              }}>👍 {aiFeedback === "up" ? "Thanks!" : "Yep"}</button>
+                              <button className="press" onClick={markGuessWrong} disabled={aiFeedback !== null} style={{
+                                border: `1.5px solid ${aiFeedback === "down" ? C.berry : C.line}`, background: aiFeedback === "down" ? "rgba(246,104,155,0.12)" : "#fff",
+                                borderRadius: 999, padding: "5px 12px", fontSize: 13, fontWeight: 700, color: aiFeedback === "down" ? C.berry : C.ink2, opacity: aiFeedback === "up" ? 0.4 : 1,
+                              }}>👎 {aiFeedback === "down" ? "Noted" : "Not quite"}</button>
+                            </div>
+                          )}
 
                           {/* Scaled kcal + macros */}
                           <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginTop: 14 }}>
@@ -836,7 +925,7 @@ export default function App() {
                   <h1 style={{ fontFamily: heading, fontSize: 26, fontWeight: 800 }}>Insights 💡</h1>
                   <p style={{ color: C.muted, fontSize: 13 }}>Friendly tips from what you've logged</p>
                 </div>
-                {insights.map((ins, i) => <InsightCard key={i} {...ins} />)}
+                {allInsights.map((ins, i) => <InsightCard key={i} {...ins} />)}
                 <div style={{ background: "rgba(255,159,69,0.1)", border: `1.5px solid rgba(255,159,69,0.24)`, borderRadius: 18, padding: "14px 16px", display: "flex", gap: 10, alignItems: "center" }}>
                   <span style={{ fontSize: 22 }}>💧</span>
                   <p style={{ fontSize: 13, color: C.ink2, lineHeight: 1.45 }}>Tip of the day: sip water before meals. It aids digestion and helps you read true hunger.</p>

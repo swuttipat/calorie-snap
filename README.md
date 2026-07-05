@@ -20,6 +20,10 @@ Install it on your phone's home screen, no App Store needed.
 
 - 📸 **Snap** — take or choose a photo; an animated "analyzing" step suggests a food with a
   match score, plus alternates and a full searchable food list to correct it
+- 👍👎 **Accuracy feedback** — rate any AI guess right on the result card. A "not quite"
+  (or picking a different food) is remembered as a correction and quietly included as context
+  on your next few scans, so the model gets a hint before repeating the same mislabel for you.
+  An "AI accuracy" card appears in Insights once there's enough feedback to be meaningful.
 - 🍚 **Portion + meal** — Small / Medium / Large scaling and Breakfast / Lunch / Dinner / Snack
 - 📔 **Diary** — animated calorie ring vs your goal, carbs/protein/fat bars, meals grouped with
   per-item delete, and an editable daily goal
@@ -45,6 +49,11 @@ Real photo scanning needs an Anthropic API key.
 Without a key configured, real photo scans will show a friendly error and drop you straight
 into search — the rest of the app (Diary, Trends, Insights, the demo plate) still works fully
 offline.
+
+**If accuracy still isn't good enough** after the prompt/temperature tuning already in
+`api/analyze.js`, you can swap in a stronger (pricier) vision model without touching code: add
+an optional `VISION_MODEL` env var, e.g. `claude-sonnet-5`, alongside `ANTHROPIC_API_KEY`. Left
+unset, it defaults to `claude-haiku-4-5-20251001` (fast/cheap).
 
 ## Run locally
 
