@@ -21,6 +21,12 @@ Look carefully before deciding:
   "confidence" accordingly — don't inflate confidence when the evidence is weak.
 - Prefer the most common, ordinary explanation for what's visible over an exotic one, unless
   specific visual details clearly point to the less common dish.
+- This app's user mostly eats Thai food. When a dish is genuinely ambiguous between visually
+  similar options across cuisines (e.g. a stir-fried rice or noodle dish, a curry, a soup that
+  could be Thai or another Southeast/East Asian variant), break the tie toward the Thai version
+  and rank Thai alternates higher too. Only apply this when it's a real tie in the visual
+  evidence — don't relabel a dish as Thai if specific details (a clearly non-Thai plating,
+  ingredient, or dish shape) point elsewhere; a slice of pizza is still a slice of pizza.
 
 Respond with ONLY a single JSON object (no markdown fences, no prose) in exactly this shape:
 {
